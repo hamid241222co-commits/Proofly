@@ -4,3 +4,12 @@ scikit-learn
 spacy
 pydantic
 python-dotenv
+supabase
+google-genai
+PyJWT[crypto]
+python-multipart
+textstat
+pytest
+pymupdf
+python-docx
+groq

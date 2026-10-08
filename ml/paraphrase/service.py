@@ -10,7 +10,7 @@ def get_ngrams(words: list[str], n: int) -> set:
         return set()
     return set(tuple(words[i:i+n]) for i in range(len(words)-n+1))
 
-def calculate_paraphrase(source_text: str, submitted_text: str) -> ParaphraseResult:
+def calculate_paraphrase(source_text: str, submitted_text: str, sub_features=None) -> ParaphraseResult:
     if not source_text or not source_text.strip():
         return ParaphraseResult(
             semantic_similarity=0.0,
@@ -74,7 +74,10 @@ def calculate_paraphrase(source_text: str, submitted_text: str) -> ParaphraseRes
     
     # Feature extraction for structural changes
     source_feat = extract_features(source_text)
-    sub_feat = extract_features(submitted_text)
+    if sub_features:
+        sub_feat = sub_features
+    else:
+        sub_feat = extract_features(submitted_text)
     
     # Transformation Logic
     paraphrase_signal = 0.0

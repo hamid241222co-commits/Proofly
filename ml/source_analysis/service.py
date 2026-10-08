@@ -21,7 +21,15 @@ def calculate_similarity(submission_text: str, references: list[ReferenceDocumen
         )
         
     # Get embeddings for submission
-    sub_embeds = get_raw_embeddings(sub_chunks)
+    try:
+        sub_embeds = get_raw_embeddings(sub_chunks)
+    except Exception as e:
+        return SourceSimilarityResult(
+            overall_similarity_score=0.0,
+            strong_match_percentage=0.0,
+            top_matches=[],
+            error=str(e)
+        )
     
     # Process references
     all_ref_chunks = []
@@ -40,7 +48,15 @@ def calculate_similarity(submission_text: str, references: list[ReferenceDocumen
             top_matches=[]
         )
         
-    ref_embeds = get_raw_embeddings(all_ref_chunks)
+    try:
+        ref_embeds = get_raw_embeddings(all_ref_chunks)
+    except Exception as e:
+        return SourceSimilarityResult(
+            overall_similarity_score=0.0,
+            strong_match_percentage=0.0,
+            top_matches=[],
+            error=str(e)
+        )
     
     # Compute similarity matrix
     sim_matrix = cosine_similarity(sub_embeds, ref_embeds)

@@ -2,7 +2,7 @@ from fastapi import Depends, HTTPException, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import os
 import jwt
-from typing import Optional
+from jwt import PyJWKClient
 from pydantic import BaseModel
 
 security = HTTPBearer()
@@ -12,28 +12,45 @@ class User(BaseModel):
     email: str
     role: str
 
+_jwks_client = None
+
+def get_jwks_client():
+    global _jwks_client
+    if _jwks_client is None:
+        supabase_url = os.environ.get("SUPABASE_URL")
+        if supabase_url:
+            jwks_url = f"{supabase_url}/auth/v1/.well-known/jwks.json"
+            _jwks_client = PyJWKClient(jwks_url)
+    return _jwks_client
+
 def get_current_user(credentials: HTTPAuthorizationCredentials = Security(security)) -> User:
     token = credentials.credentials
     secret = os.environ.get("SUPABASE_JWT_SECRET")
     
-    if not secret:
-        # In a real app we'd fail hard here, but for testing we can mock it
-        if token == "mock-instructor-token":
-            return User(id="inst_1", email="instructor@test.com", role="instructor")
-        elif token == "mock-student-token":
-            return User(id="stu_1", email="student@test.com", role="student")
-        elif token == "mock-student2-token":
-            return User(id="stu_2", email="student2@test.com", role="student")
-        raise HTTPException(status_code=500, detail="JWT secret not configured")
-        
     try:
-        # Supabase JWTs use HS256 algorithm
-        payload = jwt.decode(token, secret, algorithms=["HS256"], audience="authenticated")
+        header = jwt.get_unverified_header(token)
+        alg = header.get("alg")
+        
+        if alg == "HS256":
+            if not secret:
+                raise HTTPException(status_code=500, detail="JWT secret not configured")
+            payload = jwt.decode(token, secret, algorithms=["HS256"], audience="authenticated")
+        else:
+            client = get_jwks_client()
+            if not client:
+                raise HTTPException(status_code=500, detail="SUPABASE_URL not configured for JWKS")
+            signing_key = client.get_signing_key_from_jwt(token)
+            payload = jwt.decode(
+                token, 
+                signing_key.key, 
+                algorithms=["RS256", "ES256", alg], 
+                audience="authenticated"
+            )
+
         user_id = payload.get("sub")
         email = payload.get("email")
         
         # In Supabase, custom claims or app_metadata usually hold roles.
-        # Defaulting to 'student' if not explicitly an instructor.
         app_metadata = payload.get("app_metadata", {})
         role = app_metadata.get("role", "student")
         
@@ -44,6 +61,10 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Security(securi
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token has expired")
     except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    except HTTPException:
+        raise
+    except Exception:
         raise HTTPException(status_code=401, detail="Invalid token")
 
 def get_instructor_user(user: User = Depends(get_current_user)) -> User:

@@ -2,8 +2,9 @@ from typing import List
 from ml.features.extractor import extract_features
 from ml.fingerprint.models import WritingFingerprint, FeatureDeviation, FingerprintComparisonResult
 
-def create_fingerprint_from_text(text: str) -> WritingFingerprint:
-    features = extract_features(text)
+def create_fingerprint_from_text(text: str, features=None) -> WritingFingerprint:
+    if not features:
+        features = extract_features(text)
     
     chars = max(features.basic.character_count, 1)
     
@@ -58,7 +59,7 @@ def create_baseline(texts: List[str]) -> WritingFingerprint:
         return create_fingerprint_from_text("")
     return aggregate_fingerprints(fps)
 
-def compare_fingerprints(baseline: WritingFingerprint, new_text: str) -> FingerprintComparisonResult:
+def compare_fingerprints(baseline: WritingFingerprint, new_text: str, features=None) -> FingerprintComparisonResult:
     if not baseline:
         return FingerprintComparisonResult(
             style_similarity=0.0, deviation_score=0.0,
@@ -73,7 +74,7 @@ def compare_fingerprints(baseline: WritingFingerprint, new_text: str) -> Fingerp
             error="New text is empty or too short"
         )
         
-    new_fp = create_fingerprint_from_text(new_text)
+    new_fp = create_fingerprint_from_text(new_text, features)
     
     features_to_compare = [
         "avg_sentence_length", "sentence_length_std", "vocabulary_diversity",

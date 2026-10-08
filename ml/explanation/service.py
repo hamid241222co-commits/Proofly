@@ -16,15 +16,7 @@ def generate_explanation(evidence: EvidenceEngineResult) -> ExplanationResponse:
         recommended_instructor_action="Instructor review is recommended to verify the evidence."
     )
     
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        return ExplanationResponse(
-            report=fallback_report,
-            success=False,
-            error="GEMINI_API_KEY is not set."
-        )
-        
-    client = genai.Client(api_key=api_key)
+    provider = os.environ.get("LLM_PROVIDER", "gemini").lower()
     
     system_instruction = (
         "You are a neutral, objective academic integrity assistant. "
@@ -52,36 +44,95 @@ def generate_explanation(evidence: EvidenceEngineResult) -> ExplanationResponse:
     
     Based on this data, provide a structured explanation report.
     """
-    
-    try:
-        interaction = client.interactions.create(
-            model="gemini-3.8-flash",
-            input=prompt,
-            system_instruction=system_instruction,
-            response_format=[
-                {
-                    "type": "text",
-                    "mime_type": "application/json",
-                    "schema": ExplanationReport.model_json_schema(),
-                }
-            ],
-            # Do not use store=False unless required, but tests might mock this
-        )
-        
-        if not interaction.output_text:
-            raise ValueError("Empty response from Gemini")
+
+    if provider == "groq":
+        try:
+            import groq
+            groq_api_key = os.environ.get("GROQ_API_KEY")
+            if not groq_api_key:
+                return ExplanationResponse(
+                    report=fallback_report,
+                    success=False,
+                    error="GROQ_API_KEY is not set."
+                )
+            client = groq.Groq(api_key=groq_api_key)
+            model = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
             
-        # Parse JSON output
-        parsed_report_dict = json.loads(interaction.output_text)
-        report = ExplanationReport(**parsed_report_dict)
+            # Groq JSON mode requires explicit instruction to return JSON
+            schema = ExplanationReport.model_json_schema()
+            groq_prompt = prompt + f"\n\nYou must respond ONLY in valid JSON matching this schema:\n{json.dumps(schema)}"
+            
+            completion = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_instruction},
+                    {"role": "user", "content": groq_prompt}
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.0
+            )
+            
+            output_text = completion.choices[0].message.content
+            if not output_text:
+                raise ValueError("Empty response from Groq")
+                
+            parsed_report_dict = json.loads(output_text)
+            report = ExplanationReport(**parsed_report_dict)
+            return ExplanationResponse(report=report, success=True)
+            
+        except ImportError:
+            return ExplanationResponse(
+                report=fallback_report,
+                success=False,
+                error="Groq SDK is not installed."
+            )
+        except Exception as e:
+            return ExplanationResponse(
+                report=fallback_report,
+                success=False,
+                error=f"Groq API error: {str(e)}"
+            )
+    else:
+        # Default to Gemini
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            return ExplanationResponse(
+                report=fallback_report,
+                success=False,
+                error="GEMINI_API_KEY is not set."
+            )
+            
+        client = genai.Client(api_key=api_key)
         
-        return ExplanationResponse(
-            report=report,
-            success=True
-        )
-    except Exception as e:
-        return ExplanationResponse(
-            report=fallback_report,
-            success=False,
-            error=str(e)
-        )
+        try:
+            interaction = client.interactions.create(
+                model="gemini-3.8-flash",
+                input=prompt,
+                system_instruction=system_instruction,
+                response_format=[
+                    {
+                        "type": "text",
+                        "mime_type": "application/json",
+                        "schema": ExplanationReport.model_json_schema(),
+                    }
+                ],
+            )
+            
+            if not interaction.output_text:
+                raise ValueError("Empty response from Gemini")
+                
+            # Parse JSON output
+            parsed_report_dict = json.loads(interaction.output_text)
+            report = ExplanationReport(**parsed_report_dict)
+            
+            return ExplanationResponse(
+                report=report,
+                success=True
+            )
+        except Exception as e:
+            return ExplanationResponse(
+                report=fallback_report,
+                success=False,
+                error=f"Gemini API error: {str(e)}"
+            )
+

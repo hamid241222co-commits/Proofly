@@ -1,8 +1,9 @@
 from ml.features.extractor import extract_features
 from ml.ai_detection.models import SignalResult, AISignalsResponse
 
-def analyze_signals(text: str) -> AISignalsResponse:
-    features = extract_features(text)
+def analyze_signals(text: str, features=None) -> AISignalsResponse:
+    if not features:
+        features = extract_features(text)
     
     signals = []
     

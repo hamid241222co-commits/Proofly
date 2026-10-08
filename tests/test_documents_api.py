@@ -2,8 +2,17 @@ from fastapi.testclient import TestClient
 from backend.main import app
 import io
 import docx
+import jwt
+import os
 
 client = TestClient(app)
+
+SECRET = "super-secret-test-key-which-is-at-least-32-chars-long"
+os.environ["SUPABASE_JWT_SECRET"] = SECRET
+
+def get_token():
+    payload = {"sub": "stu_1", "email": "test@test.com", "app_metadata": {"role": "student"}, "aud": "authenticated"}
+    return jwt.encode(payload, SECRET, algorithm="HS256")
 
 def test_health_check():
     response = client.get("/api/health")
@@ -13,7 +22,7 @@ def test_health_check():
 def test_upload_txt():
     content = b"Hello world!\nThis is a test document."
     files = {"file": ("test.txt", content, "text/plain")}
-    headers = {"Authorization": "Bearer mock-student-token"}
+    headers = {"Authorization": f"Bearer {get_token()}"}
     response = client.post("/api/documents/upload", files=files, headers=headers)
     assert response.status_code == 200
     data = response.json()
@@ -31,7 +40,7 @@ def test_upload_docx():
     file_stream.seek(0)
     
     files = {"file": ("test.docx", file_stream, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")}
-    headers = {"Authorization": "Bearer mock-student-token"}
+    headers = {"Authorization": f"Bearer {get_token()}"}
     response = client.post("/api/documents/upload", files=files, headers=headers)
     assert response.status_code == 200
     data = response.json()
@@ -40,14 +49,14 @@ def test_upload_docx():
 
 def test_upload_empty_document():
     files = {"file": ("empty.txt", b"", "text/plain")}
-    headers = {"Authorization": "Bearer mock-student-token"}
+    headers = {"Authorization": f"Bearer {get_token()}"}
     response = client.post("/api/documents/upload", files=files, headers=headers)
     assert response.status_code == 400
     assert "empty" in response.json()["detail"].lower()
 
 def test_upload_invalid_type():
     files = {"file": ("image.png", b"fake image content", "image/png")}
-    headers = {"Authorization": "Bearer mock-student-token"}
+    headers = {"Authorization": f"Bearer {get_token()}"}
     response = client.post("/api/documents/upload", files=files, headers=headers)
     assert response.status_code == 400
     assert "unsupported" in response.json()["detail"].lower()

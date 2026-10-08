@@ -3,8 +3,15 @@ from fastapi.testclient import TestClient
 from backend.main import app
 from unittest.mock import patch, MagicMock
 import os
+import jwt
 
 client = TestClient(app)
+
+SECRET = "super-secret-test-key-which-is-at-least-32-chars-long"
+
+def get_token(role="instructor"):
+    payload = {"sub": "inst_1", "email": "inst@test.com", "app_metadata": {"role": role}, "aud": "authenticated"}
+    return jwt.encode(payload, SECRET, algorithm="HS256")
 
 def fake_get_raw_embeddings_orch(texts):
     embeds = []
@@ -16,7 +23,7 @@ class DummyInteraction:
     def __init__(self, output_text):
         self.output_text = output_text
 
-@patch.dict(os.environ, {"SUPABASE_URL": "http://fake-url", "SUPABASE_KEY": "fake-key", "GEMINI_API_KEY": "fake-key"})
+@patch.dict(os.environ, {"SUPABASE_URL": "http://fake-url", "SUPABASE_KEY": "fake-key", "GEMINI_API_KEY": "fake-key", "SUPABASE_JWT_SECRET": SECRET})
 @patch("ml.source_analysis.service.get_raw_embeddings", side_effect=fake_get_raw_embeddings_orch)
 @patch("ml.paraphrase.service.get_raw_embeddings", side_effect=fake_get_raw_embeddings_orch)
 @patch("ml.explanation.service.genai.Client")
@@ -48,8 +55,8 @@ def test_orchestrator_pipeline_success(mock_supabase, mock_gemini, mock_embed_pa
     
     # Mock select for auth validation
     mock_select_response = MagicMock()
-    mock_select_response.data = [{"user_id": "inst_1"}]
-    mock_sb_client.table().select().eq().execute.return_value = mock_select_response
+    mock_select_response.data = [{"user_id": "inst_1", "id": "db_id"}]
+    mock_sb_client.table.return_value.select.return_value.eq.return_value.eq.return_value.execute.return_value = mock_select_response
 
     # Prepare file upload
     file_content = b"This is a sample document for testing the end-to-end pipeline. It needs to have a few words so the extraction works correctly and doesn't fail the minimum word count check."
@@ -63,23 +70,21 @@ def test_orchestrator_pipeline_success(mock_supabase, mock_gemini, mock_embed_pa
         "reference_sources_json": json.dumps([{"id": "source1", "text": "This is a reference text."}])
     }
     
-    headers = {"Authorization": "Bearer mock-instructor-token"}
+    headers = {"Authorization": f"Bearer {get_token()}"}
     response = client.post("/api/analysis/run", files=files, data=data, headers=headers)
     assert response.status_code == 200
     
     res_data = response.json()
-    assert res_data["student_id"] == "student123"
+    assert res_data["student_id"] == "db_id"
     assert "word_count" in res_data["document_statistics"]
     assert res_data["linguistic_features"] is not None
     assert res_data["ai_linguistic_signals"] is not None
-    # Fingerprint and others should execute and not be None (or return their respective models)
     
-    # We expect exactly one "error" because we pass None for baseline: "Fingerprint info: No baseline provided"
     expected_errors = [e for e in res_data["errors"] if "baseline" not in e.lower()]
     assert len(expected_errors) == 0, f"Unexpected errors: {expected_errors}"
     assert res_data["gemini_explanation"] is not None
-    assert res_data["gemini_explanation"] is not None
 
+@patch.dict(os.environ, {"SUPABASE_JWT_SECRET": SECRET, "SUPABASE_URL": ""})
 def test_orchestrator_short_text():
     file_content = b"Too short"
     files = {
@@ -90,9 +95,12 @@ def test_orchestrator_short_text():
         "assignment_name": "Final Essay"
     }
     
-    headers = {"Authorization": "Bearer mock-instructor-token"}
+    headers = {"Authorization": f"Bearer {get_token()}"}
     response = client.post("/api/analysis/run", files=files, data=data, headers=headers)
     assert response.status_code == 200
     res_data = response.json()
     assert len(res_data["errors"]) == 1
     assert "too short" in res_data["errors"][0].lower()
+
+
+

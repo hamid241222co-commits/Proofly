@@ -79,3 +79,52 @@ def test_explanation_missing_api_key():
     data = response.json()
     assert data["success"] is False
     assert "GEMINI_API_KEY" in data["error"]
+
+@patch.dict(os.environ, {"LLM_PROVIDER": "groq", "GROQ_API_KEY": "fake_groq_key"})
+@patch("groq.Groq")
+def test_explanation_groq_success(mock_groq_class):
+    mock_client = MagicMock()
+    mock_groq_class.return_value = mock_client
+    
+    mock_response_json = json.dumps({
+        "executive_summary": "Groq: The submission shows several signals associated with high risk.",
+        "main_evidence_findings": ["Source similarity is very high."],
+        "why_each_finding_matters": ["Direct matches indicate unoriginal content."],
+        "conflicting_weak_evidence": [],
+        "limitations": ["Automated analysis is not definitive."],
+        "recommended_instructor_action": "Instructor review is recommended."
+    })
+    
+    # Mock chat.completions.create
+    mock_completion = MagicMock()
+    mock_choice = MagicMock()
+    mock_choice.message.content = mock_response_json
+    mock_completion.choices = [mock_choice]
+    mock_client.chat.completions.create.return_value = mock_completion
+    
+    response = client.post("/api/analysis/explanation", json=dummy_evidence)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["success"] is True
+    assert "Groq:" in data["report"]["executive_summary"]
+
+@patch.dict(os.environ, {"LLM_PROVIDER": "groq", "GROQ_API_KEY": ""}, clear=True)
+def test_explanation_groq_missing_key():
+    response = client.post("/api/analysis/explanation", json=dummy_evidence)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["success"] is False
+    assert "GROQ_API_KEY is not set" in data["error"]
+
+@patch.dict(os.environ, {"LLM_PROVIDER": "groq", "GROQ_API_KEY": "fake_groq_key"})
+@patch("groq.Groq")
+def test_explanation_groq_api_failure(mock_groq_class):
+    mock_client = MagicMock()
+    mock_groq_class.return_value = mock_client
+    mock_client.chat.completions.create.side_effect = Exception("Groq timeout")
+    
+    response = client.post("/api/analysis/explanation", json=dummy_evidence)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["success"] is False
+    assert "Groq timeout" in data["error"]

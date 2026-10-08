@@ -15,6 +15,7 @@ class SourceSimilarityResult(BaseModel):
     overall_similarity_score: float  # Weighted or max overall representation
     strong_match_percentage: float   # % of submission with strong matches
     top_matches: List[MatchDetail]
+    error: Optional[str] = None
 
 class SourceSimilarityRequest(BaseModel):
     submission_text: str

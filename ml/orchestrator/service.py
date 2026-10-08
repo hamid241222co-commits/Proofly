@@ -1,5 +1,8 @@
 import datetime
 import traceback
+import time
+import logging
+import concurrent.futures
 from typing import List, Dict, Any, Optional
 from ml.orchestrator.models import OrchestratorResult
 
@@ -18,6 +21,8 @@ from ml.explanation.service import generate_explanation
 # Database Repository
 from backend.db.repository import DatabaseRepository
 
+logger = logging.getLogger(__name__)
+
 def run_orchestrator(
     student_id: str,
     assignment_name: str,
@@ -27,10 +32,12 @@ def run_orchestrator(
     reference_sources: Optional[List[Dict[str, str]]] = None
 ) -> OrchestratorResult:
     
+    overall_start_time = time.time()
     errors: List[str] = []
     repo = DatabaseRepository()
     
     # 1. Start submission tracking
+    db_start = time.time()
     submission_id = "temp_" + str(datetime.datetime.now().timestamp())
     try:
         db_sub = repo.save_submission(student_id, assignment_name)
@@ -38,8 +45,11 @@ def run_orchestrator(
             submission_id = db_sub["id"]
     except Exception as e:
         errors.append(f"DB submission failed: {str(e)}")
+    db_dur = time.time() - db_start
+    logger.info(f"DB init duration: {db_dur:.2f}s")
 
     # 2. Text Extraction
+    ext_start = time.time()
     try:
         extracted_text = extract_text(file_bytes, filename, file_type)
         if not extracted_text:
@@ -55,6 +65,9 @@ def run_orchestrator(
             
     except Exception as e:
         return _bail_out(submission_id, student_id, assignment_name, f"Text extraction failed: {str(e)}")
+    
+    ext_dur = time.time() - ext_start
+    logger.info(f"Extraction duration: {ext_dur:.2f}s")
 
     if word_count < 10:
         return _bail_out(submission_id, student_id, assignment_name, "Document is too short for any meaningful analysis.")
@@ -65,49 +78,61 @@ def run_orchestrator(
         extracted_text = " ".join(extracted_text.split()[:25000])
         errors.append("Document exceeded 25,000 words. Analysis was truncated to the first 25,000 words.")
 
-    # 3. Feature Extraction
-    features = None
+    # PARALLEL EXECUTION OF FEATURES
+    ai_start = time.time()
+    features, ai_signals, fingerprint, source_similarity, paraphrase = None, None, None, None, None
+    
+    # 1. Run core feature extraction first (synchronously) to avoid redundant heavy NLP processing
     try:
         features = extract_features(extracted_text)
     except Exception as e:
         errors.append(f"Feature extraction failed: {str(e)}")
+        # We need features for the other models, so we bail out if this fails completely.
+        from ml.features.extractor import get_empty_features
+        features = get_empty_features()
 
-    # 4. AI Writing Signals
-    ai_signals = None
+    def run_source_sim():
+        if not reference_sources: return None, None
+        refs = [ReferenceDocument(id=r["id"], text=r["text"]) for r in reference_sources]
+        ss = calculate_similarity(extracted_text, refs)
+        pa = None
+        if ss and ss.top_matches:
+            top_match_id = ss.top_matches[0].reference_id
+            matched_ref_text = next((r.text for r in refs if r.id == top_match_id), None)
+            if matched_ref_text:
+                pa = calculate_paraphrase(matched_ref_text, extracted_text, sub_features=features)
+        return ss, pa
+        
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
+    f_sig = executor.submit(analyze_signals, extracted_text, features)
+    f_fin = executor.submit(compare_fingerprints, None, extracted_text, features)
+    f_src = executor.submit(run_source_sim)
+    
     try:
-        ai_signals = analyze_signals(extracted_text)
+        ai_signals = f_sig.result(timeout=30)
     except Exception as e:
-        errors.append(f"AI signals failed: {str(e)}")
-
-    # 5. Writing Fingerprint Comparison
-    fingerprint = None
+        errors.append(f"AI signals failed or timed out: {str(e)}")
+        
     try:
-        # Since baseline retrieval isn't fully implemented in the db layer yet, pass None
-        fingerprint = compare_fingerprints(None, extracted_text)
-        if fingerprint.error:
+        fingerprint = f_fin.result(timeout=30)
+        if fingerprint and fingerprint.error:
             errors.append(f"Fingerprint info: {fingerprint.error}")
     except Exception as e:
-        errors.append(f"Fingerprint comparison failed: {str(e)}")
+        errors.append(f"Fingerprint comparison failed or timed out: {str(e)}")
+        
+    try:
+        src_res = f_src.result(timeout=60)
+        if src_res:
+            source_similarity, paraphrase = src_res
+            if paraphrase and paraphrase.error:
+                errors.append(f"Paraphrase info: {paraphrase.error}")
+    except Exception as e:
+        errors.append(f"Source similarity/paraphrase failed or timed out: {str(e)}")
 
-    # 6. Source Similarity
-    source_similarity = None
-    paraphrase = None
-    if reference_sources:
-        try:
-            refs = [ReferenceDocument(id=r["id"], text=r["text"]) for r in reference_sources]
-            source_similarity = calculate_similarity(extracted_text, refs)
-            
-            # 7. Paraphrase Analysis
-            # If there's a strong match, we might analyze paraphrasing against the top matched source
-            if source_similarity and source_similarity.top_matches:
-                top_match_id = source_similarity.top_matches[0].reference_id
-                matched_ref_text = next((r.text for r in refs if r.id == top_match_id), None)
-                if matched_ref_text:
-                    paraphrase = calculate_paraphrase(matched_ref_text, extracted_text)
-                    if paraphrase.error:
-                         errors.append(f"Paraphrase info: {paraphrase.error}")
-        except Exception as e:
-            errors.append(f"Source similarity/paraphrase failed: {str(e)}")
+    executor.shutdown(wait=False, cancel_futures=True)
+
+    ai_dur = time.time() - ai_start
+    logger.info(f"AI analysis duration (Parallel): {ai_dur:.2f}s")
 
     # 8. Save Analysis Results to DB
     try:
@@ -154,14 +179,26 @@ def run_orchestrator(
         )
 
     # 10. Gemini Explanation
+    exp_start = time.time()
     explanation = None
     try:
-        explanation_res = generate_explanation(evidence_engine_result)
+        exp_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        exp_future = exp_executor.submit(generate_explanation, evidence_engine_result)
+        explanation_res = exp_future.result(timeout=45)
+        exp_executor.shutdown(wait=False, cancel_futures=True)
+            
         explanation = explanation_res.report
         if not explanation_res.success:
             errors.append(f"Explanation info: {explanation_res.error}")
+    except concurrent.futures.TimeoutError:
+        exp_executor.shutdown(wait=False, cancel_futures=True)
+        errors.append("Explanation failed: Timed out after 45 seconds.")
     except Exception as e:
+        exp_executor.shutdown(wait=False, cancel_futures=True)
         errors.append(f"Explanation failed: {str(e)}")
+        
+    exp_dur = time.time() - exp_start
+    logger.info(f"Explanation duration: {exp_dur:.2f}s")
 
     # 11. Persist Report
     try:
@@ -177,6 +214,8 @@ def run_orchestrator(
         )
     except Exception as e:
          errors.append(f"DB report failed: {str(e)}")
+
+    logger.info(f"Total pipeline duration: {time.time() - overall_start_time:.2f}s")
 
     return OrchestratorResult(
         submission_id=submission_id,

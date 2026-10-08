@@ -38,16 +38,36 @@ async def api_run_analysis_pipeline(
     if len(file_bytes) == 0:
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
-    # 2. Authorization (Verify instructor owns student)
+    # 2. Authorization and Student Resolution
     repo = DatabaseRepository()
+    db_student_id = student_id # Fallback if no DB
     try:
-        # Check if student exists and belongs to current_user
         sb_client = repo.client
         if sb_client:
-            stu_res = sb_client.table("students").select("user_id").eq("id", student_id).execute()
-            if not stu_res.data or stu_res.data[0].get("user_id") != current_user.id:
-                logger.warning(f"Unauthorized access attempt to student {student_id} by user {current_user.id}")
-                raise HTTPException(status_code=403, detail="Not authorized to access this student.")
+            # Ensure the instructor exists in public.users to satisfy the foreign key constraint
+            sb_client.table("users").upsert({
+                "id": current_user.id,
+                "email": current_user.email,
+                "full_name": current_user.email.split("@")[0]
+            }).execute()
+
+            # Look up student by textual identifier and instructor's user_id
+            stu_res = sb_client.table("students").select("id").eq("student_identifier", student_id).eq("user_id", current_user.id).execute()
+            
+            if not stu_res.data:
+                # Student does not exist for this instructor, automatically create them
+                logger.info(f"Student {student_id} not found for instructor {current_user.id}. Creating new student record.")
+                insert_res = sb_client.table("students").insert({
+                    "user_id": current_user.id,
+                    "student_identifier": student_id,
+                    "full_name": student_id # Defaulting name to ID for now
+                }).execute()
+                
+                if not insert_res.data:
+                    raise HTTPException(status_code=500, detail="Failed to create student record.")
+                db_student_id = insert_res.data[0]["id"]
+            else:
+                db_student_id = stu_res.data[0]["id"]
     except HTTPException:
         raise
     except Exception as e:
@@ -64,9 +84,9 @@ async def api_run_analysis_pipeline(
             
     # 4. Execute Pipeline
     try:
-        logger.info(f"Starting pipeline for student_id={student_id}, filename={file.filename}")
+        logger.info(f"Starting pipeline for student_id={db_student_id}, filename={file.filename}")
         result = run_orchestrator(
-            student_id=student_id,
+            student_id=db_student_id,
             assignment_name=assignment_name,
             filename=file.filename,
             file_type=file.content_type,
